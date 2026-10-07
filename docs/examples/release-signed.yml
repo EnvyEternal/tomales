@@ -1,0 +1,118 @@
+name: Release Tomales
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tomales-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    environment: release
+    env:
+      TOMALES_SIGNING_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+      TOMALES_NOTARY_PROFILE: tomales-notary
+      TOMALES_REPOSITORY: ${{ github.repository }}
+      TOMALES_HOMEBREW_TAP: ${{ vars.HOMEBREW_TAP }}
+      TOMALES_RELEASE_OWNER: ${{ vars.RELEASE_OWNER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check release configuration
+        id: configuration
+        env:
+          CERTIFICATE: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CERTIFICATE" && test -n "$CERTIFICATE_PASSWORD"
+          test -n "$APPLE_ID" && test -n "$APPLE_PASSWORD" && test -n "$APPLE_TEAM"
+          test -n "$TAP_TOKEN" && test -n "$TOMALES_SIGNING_IDENTITY"
+          test -n "$TOMALES_RELEASE_OWNER" && test -n "$TOMALES_HOMEBREW_TAP"
+          [[ "$TOMALES_HOMEBREW_TAP" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          test "$GITHUB_REPOSITORY_OWNER" = "$TOMALES_RELEASE_OWNER"
+          test "${TOMALES_HOMEBREW_TAP%%/*}" = "$TOMALES_RELEASE_OWNER"
+          test "$GITHUB_REF_NAME" = "v$(tr -d '[:space:]' < VERSION)"
+          echo "tap_repository=${TOMALES_RELEASE_OWNER}/homebrew-${TOMALES_HOMEBREW_TAP#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare signing Keychain
+        env:
+          CERTIFICATE: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/tomales.p12"
+          keychain_path="$RUNNER_TEMP/tomales-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" "$HOME/Library/Keychains/login.keychain-db"
+          xcrun notarytool store-credentials "$TOMALES_NOTARY_PROFILE" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM" --password "$APPLE_PASSWORD" --keychain "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+
+      - name: Build, sign, notarize and package
+        run: ./scripts/package.sh --release
+
+      - name: Preserve release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tomales-${{ github.ref_name }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Prepare personal Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.configuration.outputs.tap_repository }}
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: .build/homebrew-tap
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          gh release create "$GITHUB_REF_NAME" "dist/Tomales-$version.zip" "dist/Tomales-$version.dmg" dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "Tomales $version" --notes-file docs/RELEASE_NOTES.md
+
+      - name: Update Homebrew tap
+        run: |
+          set -euo pipefail
+          mkdir -p .build/homebrew-tap/Casks
+          cp dist/tap/Casks/tomales.rb .build/homebrew-tap/Casks/tomales.rb
+          cd .build/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/tomales.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Tomales to ${GITHUB_REF_NAME#v}"
+            git push
+          fi
+
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          keychain_path="$RUNNER_TEMP/tomales-signing.keychain-db"
+          security default-keychain -d user -s "$HOME/Library/Keychains/login.keychain-db"
+          if [[ -f "$keychain_path" ]]; then security delete-keychain "$keychain_path"; fi
+          rm -f "$RUNNER_TEMP/tomales.p12"

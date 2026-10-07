@@ -1,0 +1,8 @@
+.build/
+dist/
+.DS_Store
+*.p12
+*.key
+.env
+.swiftpm/
+
