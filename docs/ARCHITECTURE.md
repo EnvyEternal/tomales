@@ -55,9 +55,11 @@ The top-process list contains 3, 5, or 8 individual PIDs according to display pr
 
 ## Distribution
 
-`VERSION` is the single version source. `build.sh` creates a conventional `.app` bundle, a generated icon, and a local ad-hoc or Developer ID signature. `package.sh --release` requires credentials, builds universal binaries, checks notarization is Accepted, staples the app and DMG, and hashes the final downloads. The generated Homebrew cask points to an explicit versioned ZIP and SHA-256; no `latest` URL or unchecked archive.
+`VERSION` is the single version source. `build.sh` creates a conventional `.app` bundle, a generated icon, and a local ad-hoc or Developer ID signature. Current Homebrew distribution uses a formula that compiles a checksummed, versioned source archive for the user's own Mac. The native bundle lives in the formula prefix, and its launcher uses Homebrew's stable `opt` path. Formula builds embed their update command in Settings; `tomales --restart` quits an older instance before launching the current app.
 
-The release workflow guards the personal owner, prepares an ephemeral signing keychain, publishes a GitHub release, and updates the user's personal tap. The app and Homebrew keep one update authority; no Sparkle or second updater runs in the background.
+The release workflow guards the personal repository, validates its tag/version, publishes the source archive and checksums, then commits the generated formula to `main` in the same repository. It needs no Apple credentials or separate tap token. The app and Homebrew keep one update authority; no Sparkle or second updater runs in the background.
+
+Optional signed binary packaging remains available through `package.sh --release`: it requires Developer ID/notarization credentials, builds universal binaries, checks notarization is Accepted, staples the app and DMG, and hashes the final downloads. `generate-cask.py` prepares a cask for those downloads. The previous signing workflow is retained only as an inactive example under `docs/examples`.
 
 ## References
 
